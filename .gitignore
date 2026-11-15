@@ -25,6 +25,7 @@ rgbpoint_gui_state.json
 *.[jJ][pP][gG]
 *.[jJ][pP][eE][gG]
 *.[pP][nN][gG]
+!/assets/pointcolors.png
 *.[tT][iI][fF]
 *.[tT][iI][fF][fF]
 /Camera-*/

@@ -50,6 +50,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from app_identity import apply_window_icon, configure_process_identity
+
 
 def normalize_default_color(value: str) -> str:
     parts = re.findall(r"-?\d+", value or "")
@@ -79,6 +81,7 @@ class RGBPointGuiApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
+        apply_window_icon(self.root)
         self.root.geometry("1200x900")
         self.root.minsize(1020, 760)
 
@@ -785,6 +788,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    configure_process_identity()
     try:
         root = tk.Tk()
     except Exception as exc:
@@ -793,6 +797,9 @@ def main() -> int:
         return 1
 
     if args.smoke_test:
+        root.withdraw()
+        if not apply_window_icon(root):
+            raise RuntimeError("Application icon could not be loaded.")
         root.update_idletasks()
         root.destroy()
         print("gui ok")

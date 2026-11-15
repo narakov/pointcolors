@@ -9,6 +9,8 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
+from app_identity import apply_window_icon
+
 BACKGROUND = (18, 25, 38)
 
 
@@ -54,6 +56,7 @@ class PreviewWindow:
         self.folder = Path(folder)
         self.window = tk.Toplevel(root)
         self.window.title("Live 3D Preview — Experimental")
+        apply_window_icon(self.window)
         self.window.geometry("1040x760")
         self.window.minsize(640, 480)
         self.window.columnconfigure(0, weight=1)

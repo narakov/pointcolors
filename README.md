@@ -22,8 +22,40 @@ proceed directly to colorization without running photo selection.
 
 ## Installation and launch on Windows
 
-Python 3.12 and uv are recommended. Dependencies are NumPy, Pillow and SciPy
-(the latter is used for photo-set optimization).
+Use 64-bit Windows and a full 64-bit Python 3.12, 3.13 or 3.14 installation
+with Tcl/Tk enabled. Python 3.12 is the recommended version. If Python is not
+installed, get it from [python.org](https://www.python.org/downloads/windows/)
+first; setup reports a clear error if a compatible interpreter is missing.
+
+1. Clone this repository, or pull its latest changes.
+2. Double-click **`Setup Windows.bat`** inside the repository folder.
+3. Wait for setup to finish. It opens the application and creates the
+   **Point Colors** shortcut on your desktop with the RGB Points icon.
+4. Use that shortcut for later launches; setup does not run again when you
+   open the application.
+
+Setup creates or reuses the local `.venv`, installs the pinned libraries from
+`requirements.txt`, checks the graphical interface and updates the shortcut.
+It installs libraries only into the application's environment. Internet access
+is required to download missing libraries. Setup messages are saved in
+`pointcolors_setup.log`, which is excluded from Git.
+
+The shortcut launches the application directly without a console window.
+`run_gui.bat` also launches the prepared environment; `run_gui_debug.bat` keeps
+a console open for troubleshooting. Keep the repository folder in place:
+the shortcut refers to it, and `.venv` must be created separately on each computer.
+
+To update:
+
+```powershell
+git pull origin main
+```
+
+Close the application before updating. Rerun **Setup Windows.bat** when
+requirements change or the shortcut needs refreshing. Repeating setup is safe:
+it reuses compatible environments and preserves your cloud files and settings.
+
+Manual setup with uv is also available:
 
 ```powershell
 uv venv .venv --python 3.12
@@ -31,9 +63,18 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 .venv\Scripts\python.exe rgbpoint_gui.py
 ```
 
-Use the **Point Colors** desktop shortcut when available. The original
-`run_gui.bat` and `run_gui_debug.bat` launchers use a system Python, which may
-not have the dependencies installed in this project's virtual environment.
+Create or refresh the desktop shortcut after preparing the environment:
+
+```powershell
+.venv\Scripts\python.exe app_identity.py --create-shortcut
+```
+
+The RGB Points icon is shared by the shortcut, application windows and Windows
+taskbar. Artwork is stored in `assets/`, including a multi-size Windows ICO.
+
+For unattended verification, `setup_windows.ps1` accepts `-NoLaunch` and
+`-NoShortcut`. Use `-Python "C:\path\to\python.exe"` to select a base interpreter
+when creating a new environment. These options are also accepted by the batch launcher.
 
 ## Select photos before downloading
 
@@ -149,6 +190,8 @@ under `build/`; see `experimental_preview/README.md` for removal instructions.
 ## Main files
 
 - `rgbpoint_gui.py` — desktop interface.
+- `app_identity.py` — application icons and Windows desktop shortcut.
+- `Setup Windows.bat` / `setup_windows.ps1` — first-run Windows setup.
 - `photo_selection_dialog.py` — photo-set selection and optimization controls.
 - `experimental_preview/` — optional viewer and temporary snapshot stream.
 - `photo_selection.py` — metadata discovery and photo download lists.
