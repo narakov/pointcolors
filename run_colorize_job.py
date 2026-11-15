@@ -97,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=tuple(PROFILES.keys()), default="enhanced")
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument("--default-color", default="0,0,0")
+    parser.add_argument("--preview-dir", type=Path, help="Optional experimental preview stream.")
     return parser.parse_args()
 
 
@@ -107,7 +108,9 @@ def parse_default_color(value: str) -> np.ndarray:
     elif len(parts) == 2:
         parts = [parts[0], parts[1], "0"]
     elif len(parts) != 3:
-        raise ValueError("--default-color must contain one, two, or three values between 0 and 255.")
+        raise ValueError(
+            "--default-color must contain one, two, or three values between 0 and 255."
+        )
     values = [int(part) for part in parts]
     if any(component < 0 or component > 255 for component in values):
         raise ValueError("--default-color must contain values between 0 and 255.")
@@ -123,20 +126,28 @@ def run_profile(
     profile_name: str,
     chunk_size: int,
     default_color: np.ndarray,
+    preview=None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     profile = PROFILES[profile_name]
     print(f"Profile: {profile.title}")
     print(profile.description)
+    progress = {"on_image": preview.update} if preview is not None else {}
+    if preview is not None:
+        preview.begin(las_path, profile.title, default_color)
 
     if profile.blend_with_standard:
-        with tempfile.TemporaryDirectory(prefix="rgbpoint_job_", dir=str(output_path.parent.resolve())) as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="rgbpoint_job_", dir=str(output_path.parent.resolve())
+        ) as temp_dir:
             temp_root = Path(temp_dir)
             primary_path = temp_root / "primary_roll_minus.las"
             fallback_path = temp_root / "fallback_standard.las"
 
             print("")
             print("Running primary pass: Roll Minus")
+            if preview is not None:
+                preview.set_pass("Pass 1/2 · Roll Minus")
             colorize(
                 las_path=las_path,
                 cal_path=cal_path,
@@ -148,10 +159,13 @@ def run_profile(
                 default_color=default_color,
                 disable_overlap_filter=False,
                 projection_options=profile.projection,
+                **progress,
             )
 
             print("")
             print("Running fallback pass: Standard")
+            if preview is not None:
+                preview.set_pass("Pass 2/2 · Standard fallback", fallback=True)
             colorize(
                 las_path=las_path,
                 cal_path=cal_path,
@@ -163,14 +177,19 @@ def run_profile(
                 default_color=default_color,
                 disable_overlap_filter=False,
                 projection_options=PROFILES["standard"].projection,
+                **progress,
             )
 
             print("")
             print("Blending passes into final result")
             blend(primary_path, fallback_path, output_path, chunk_size)
             print(f"Output written to: {output_path}")
+            if preview is not None:
+                preview.finish(output_path)
         return
 
+    if preview is not None:
+        preview.set_pass(profile.title)
     colorize(
         las_path=las_path,
         cal_path=cal_path,
@@ -182,7 +201,10 @@ def run_profile(
         default_color=default_color,
         disable_overlap_filter=False,
         projection_options=profile.projection,
+        **progress,
     )
+    if preview is not None:
+        preview.finish(output_path)
 
 
 def resolve_outputs(args: argparse.Namespace, las_paths: list[Path]) -> list[Path]:
@@ -218,6 +240,11 @@ def main() -> int:
     default_color = parse_default_color(args.default_color)
     las_paths = [path.resolve() for path in args.las]
     output_paths = resolve_outputs(args, las_paths)
+    preview = None
+    if args.preview_dir is not None:
+        from experimental_preview.stream import PreviewPublisher
+
+        preview = PreviewPublisher(args.preview_dir)
 
     for index, (las_path, output_path) in enumerate(zip(las_paths, output_paths), start=1):
         if las_path == output_path:
@@ -238,6 +265,7 @@ def main() -> int:
             profile_name=args.profile,
             chunk_size=args.chunk_size,
             default_color=default_color,
+            preview=preview,
         )
     return 0
 

@@ -12,8 +12,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-
-APP_TITLE = "RGB Point Cloud Colorizer (Python)"
+APP_TITLE = "Point Colors — RGB Point Cloud Colorizer"
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATE_FILE = PROJECT_ROOT / "rgbpoint_gui_state.json"
 RUN_LOG_FILE = PROJECT_ROOT / "rgbpoint_gui_run.log"
@@ -22,6 +21,8 @@ DEFAULT_CHUNK_SIZE = "1000000"
 DEFAULT_COLOR = "0,0,0"
 DEFAULT_BATCH_SUFFIX = "_gui_rgb"
 DEFAULT_PROFILE = "enhanced"
+ABOUT_ORGANIZATION = "Laboratory of Information Modeling Technologies and Machine Learning"
+ABOUT_COPYRIGHT = "Copyright © Tikhonov Timofey, laboratory research assistant"
 
 
 def append_file_line(path: Path, message: str) -> None:
@@ -78,14 +79,23 @@ class RGBPointGuiApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1200x820")
-        self.root.minsize(980, 700)
+        self.root.geometry("1200x900")
+        self.root.minsize(1020, 760)
 
         self.process: subprocess.Popen[str] | None = None
         self.stdout_thread: threading.Thread | None = None
         self.stderr_thread: threading.Thread | None = None
         self.log_queue: queue.Queue[tuple[str, bool]] = queue.Queue()
         self.last_error = ""
+        self.analysis_queue: queue.Queue = queue.Queue()
+        self.analysis_running = False
+        self._about_dialog: tk.Toplevel | None = None
+        self.preview_session = None
+        self.preview_enabled_var = tk.BooleanVar(value=False)
+        self.data_root_var = tk.StringVar(value=str(PROJECT_ROOT))
+        self.selection_status_var = tk.StringVar(
+            value="Use CAL and IML above, or leave them empty to search the metadata folder. Photos are not required yet."
+        )
 
         self.las_var = tk.StringVar()
         self.cal_var = tk.StringVar()
@@ -108,34 +118,65 @@ class RGBPointGuiApp:
         style = ttk.Style(self.root)
         style.theme_use("clam")
 
+        menu_bar = tk.Menu(self.root, tearoff=False)
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        help_menu.add_command(label="About", underline=0, command=self.show_about)
+        menu_bar.add_cascade(label="Help", underline=0, menu=help_menu)
+        self.root.configure(menu=menu_bar)
+
         container = ttk.Frame(self.root, padding=14)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
         container.rowconfigure(2, weight=1)
 
-        title = ttk.Label(container, text="RGB Point Cloud Colorizer", font=("Segoe UI", 20, "bold"))
+        title = ttk.Label(
+            container, text="RGB Point Cloud Colorizer", font=("Segoe UI", 20, "bold")
+        )
         title.grid(row=0, column=0, sticky="w")
 
-        form = ttk.LabelFrame(container, text="Project Files", padding=10)
-        form.grid(row=1, column=0, sticky="ew", pady=(10, 8))
+        form = ttk.Frame(container, padding=(0, 10, 0, 8))
+        form.grid(row=1, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="Point Cloud (.LAS, one or many)").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(form, text="Point Cloud (.LAS, one or many)").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=4
+        )
         ttk.Entry(form, textvariable=self.las_var).grid(row=0, column=1, sticky="ew", pady=4)
         las_buttons = ttk.Frame(form)
         las_buttons.grid(row=0, column=2, sticky="w", padx=(8, 0), pady=4)
-        ttk.Button(las_buttons, text="Browse One", command=self._pick_las_file).grid(row=0, column=0, sticky="w")
+        ttk.Button(las_buttons, text="Browse One", command=self._pick_las_file).grid(
+            row=0, column=0, sticky="w"
+        )
         ttk.Button(las_buttons, text="Browse Many", command=self._pick_las_files).grid(
             row=0, column=1, sticky="w", padx=(6, 0)
         )
 
         self._add_path_row(form, 1, "Camera Calibration (.cal)", self.cal_var, self._pick_cal_file)
         self._add_path_row(form, 2, "Image List (.iml)", self.iml_var, self._pick_iml_file)
-        self._add_path_row(form, 3, "Images Folder", self.images_var, self._pick_images_dir)
-        self._add_path_row(form, 4, "Output LAS (single mode)", self.output_var, self._pick_output_file)
+
+        discovery = ttk.LabelFrame(form, text="Photo Selection Before Download", padding=10)
+        discovery.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 12))
+        discovery.columnconfigure(1, weight=1)
+        ttk.Label(discovery, text="Metadata Folder (.cal / .iml)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(discovery, textvariable=self.data_root_var).grid(
+            row=0, column=1, sticky="ew", padx=8
+        )
+        ttk.Button(discovery, text="Browse", command=self._pick_data_root).grid(row=0, column=2)
+        self.selection_button = ttk.Button(
+            discovery, text="Select Photos", command=self.start_photo_selection
+        )
+        self.selection_button.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        ttk.Label(discovery, textvariable=self.selection_status_var, wraplength=1000).grid(
+            row=2, column=0, columnspan=3, sticky="w"
+        )
+
+        self._add_path_row(form, 4, "Images Folder", self.images_var, self._pick_images_dir)
+        self._add_path_row(
+            form, 5, "Output LAS (single mode)", self.output_var, self._pick_output_file
+        )
         self._add_path_row(
             form,
-            5,
+            6,
             "Output Folder (batch, optional)",
             self.output_dir_var,
             self._pick_output_dir,
@@ -144,29 +185,105 @@ class RGBPointGuiApp:
         options = ttk.LabelFrame(container, text="Processing Settings", padding=10)
         options.grid(row=2, column=0, sticky="nsew")
         options.columnconfigure(1, weight=1)
-        options.rowconfigure(2, weight=1)
+        options.rowconfigure(4, weight=1)
 
         ttk.Label(options, text="Chunk Size").grid(row=0, column=0, sticky="w")
-        ttk.Entry(options, textvariable=self.chunk_var, width=12).grid(row=0, column=1, sticky="w", padx=(8, 18))
+        ttk.Entry(options, textvariable=self.chunk_var, width=12).grid(
+            row=0, column=1, sticky="w", padx=(8, 18)
+        )
 
         ttk.Label(options, text="Default Color").grid(row=0, column=2, sticky="w")
-        ttk.Entry(options, textvariable=self.default_color_var, width=12).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ttk.Entry(options, textvariable=self.default_color_var, width=12).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
+        )
 
         buttons = ttk.Frame(options)
         buttons.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(12, 8))
         buttons.columnconfigure(4, weight=1)
 
-        self.run_button = ttk.Button(buttons, text="Start Colorization", command=self.start_processing)
+        self.run_button = ttk.Button(
+            buttons, text="Start Colorization", command=self.start_processing
+        )
         self.run_button.grid(row=0, column=0, sticky="w")
-        ttk.Button(buttons, text="Clear Log", command=self.clear_log).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(buttons, text="Clear Log", command=self.clear_log).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+        self.preview_button = ttk.Button(
+            buttons, text="Open Preview", command=self.show_preview, state="disabled"
+        )
+        self.preview_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
         ttk.Label(buttons, textvariable=self.status_var, font=("Segoe UI", 10, "bold")).grid(
             row=0, column=4, sticky="e"
         )
 
-        ttk.Label(options, text="Run Log").grid(row=2, column=0, columnspan=4, sticky="w")
+        self.preview_check = ttk.Checkbutton(
+            options, text="Live 3D Preview (experimental)", variable=self.preview_enabled_var
+        )
+        self.preview_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        ttk.Label(options, text="Run Log").grid(row=3, column=0, columnspan=4, sticky="w")
         self.log_text = ScrolledText(options, wrap="none", height=18, font=("Consolas", 10))
-        self.log_text.grid(row=3, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
+        self.log_text.grid(row=4, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
         self.log_text.configure(state="disabled")
+
+    def show_about(self) -> None:
+        if self._about_dialog is not None and self._about_dialog.winfo_exists():
+            self._about_dialog.lift()
+            self._about_dialog.focus_set()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.withdraw()
+        self._about_dialog = dialog
+        dialog.title("About Point Colors")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        background = ttk.Style(dialog).lookup("TFrame", "background") or "SystemButtonFace"
+        dialog.configure(background=background)
+
+        content = ttk.Frame(dialog, padding=(14, 16, 18, 12))
+        content.grid(sticky="nsew")
+        content.columnconfigure(1, weight=1)
+        icon = tk.Canvas(content, width=42, height=42, highlightthickness=0)
+        icon.configure(background=background)
+        icon.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 12))
+        icon.create_oval(4, 4, 36, 36, fill="#149BDD", outline="")
+        icon.create_text(20, 20, text="i", fill="white", font=("Segoe UI", 19, "bold"))
+        ttk.Label(
+            content,
+            text=f"Point Colors — {ABOUT_ORGANIZATION}",
+            font=("Segoe UI", 10, "bold"),
+            wraplength=435,
+            justify="left",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Label(
+            content,
+            text=ABOUT_COPYRIGHT,
+            font=("Segoe UI", 9),
+            foreground="#003399",
+            wraplength=435,
+            justify="left",
+        ).grid(row=1, column=1, sticky="w", pady=(12, 16))
+
+        def close(_event=None):
+            self._about_dialog = None
+            dialog.destroy()
+
+        close_button = ttk.Button(content, text="Close", width=9, command=close)
+        close_button.grid(row=2, column=1, sticky="e", pady=(6, 0))
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", close)
+        dialog.bind("<Return>", close)
+        dialog.update_idletasks()
+        width, height = max(540, dialog.winfo_reqwidth()), dialog.winfo_reqheight()
+        x = max(0, self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2)
+        y = max(0, self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        if self.root.winfo_viewable():
+            dialog.deiconify()
+            dialog.grab_set()
+            close_button.focus_set()
 
     def _add_path_row(
         self,
@@ -178,7 +295,9 @@ class RGBPointGuiApp:
     ) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Button(parent, text="Browse", command=browse_cb).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=4)
+        ttk.Button(parent, text="Browse", command=browse_cb).grid(
+            row=row, column=2, sticky="w", padx=(8, 0), pady=4
+        )
 
     def _pick_las_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -190,6 +309,73 @@ class RGBPointGuiApp:
             if not self.output_var.get().strip():
                 p = Path(path)
                 self.output_var.set(str(p.with_name(f"{p.stem}_gui_rgb.LAS")))
+
+    def _pick_data_root(self) -> None:
+        path = filedialog.askdirectory(
+            title="Choose camera metadata folder (CAL and IML, including subfolders)"
+        )
+        if path:
+            self.data_root_var.set(path)
+
+    def start_photo_selection(self) -> None:
+        if self.analysis_running or (self.process and self.process.poll() is None):
+            return
+        paths = [Path(value) for value in parse_las_list(self.las_var.get())]
+        if not paths or any(not path.is_file() for path in paths):
+            messagebox.showerror(APP_TITLE, "Choose an existing LAS file in Point Cloud above.")
+            return
+        cal = Path(self.cal_var.get().strip()) if self.cal_var.get().strip() else None
+        iml = Path(self.iml_var.get().strip()) if self.iml_var.get().strip() else None
+        for kind, path in (("Camera Calibration", cal), ("Image List", iml)):
+            if path is not None and not path.is_file():
+                messagebox.showerror(APP_TITLE, f"{kind} file not found:\n{path}")
+                return
+        # Re-select from the original flight when the form contains an exported subset.
+        if iml is not None and iml.name.lower() == "selected.iml":
+            selection_file = iml.with_name("selection.json")
+            try:
+                original = Path(json.loads(selection_file.read_text(encoding="utf-8"))["iml"])
+                if original.is_file():
+                    iml = original
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        root = Path(self.data_root_var.get().strip() or PROJECT_ROOT)
+        if not root.is_dir() and not (cal and iml):
+            messagebox.showerror(
+                APP_TITLE,
+                "Choose a metadata folder containing CAL and IML files, or specify both files above.",
+            )
+            return
+        if not root.is_dir():
+            root = cal.parent
+        self.analysis_running = True
+        self.selection_button.configure(state="disabled")
+        self.run_button.configure(state="disabled")
+        self.selection_status_var.set(
+            "Checking camera metadata. Photographs are not needed for this step…"
+        )
+
+        def work():
+            try:
+                from photo_selection import analyze_folder
+
+                report = analyze_folder(
+                    paths,
+                    root,
+                    cal_path=cal,
+                    iml_path=iml,
+                    on_progress=lambda text: self.analysis_queue.put(("progress", text)),
+                )
+                self.analysis_queue.put(("complete", report))
+            except Exception as error:
+                self.analysis_queue.put(("error", str(error)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_photo_plans(self, report) -> None:
+        from photo_selection_dialog import show_photo_plans
+
+        show_photo_plans(self, report, PROJECT_ROOT, APP_TITLE, DEFAULT_BATCH_SUFFIX)
 
     def _pick_las_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -307,7 +493,9 @@ class RGBPointGuiApp:
             if output_single:
                 resolved_output = str(Path(output_single).resolve())
             else:
-                resolved_output = str(source_path.with_name(f"{source_path.stem}{DEFAULT_BATCH_SUFFIX}.LAS"))
+                resolved_output = str(
+                    source_path.with_name(f"{source_path.stem}{DEFAULT_BATCH_SUFFIX}.LAS")
+                )
             if resolved_las[0].lower() == resolved_output.lower():
                 messagebox.showerror(APP_TITLE, "Output LAS must be different from source LAS.")
                 return None
@@ -339,7 +527,13 @@ class RGBPointGuiApp:
 
     def _set_running(self, running: bool) -> None:
         self.run_button.configure(state="disabled" if running else "normal")
+        self.selection_button.configure(state="disabled" if running else "normal")
+        self.preview_check.configure(state="disabled" if running else "normal")
         self.status_var.set("Running" if running else "Ready")
+
+    def show_preview(self) -> None:
+        if self.preview_session is not None:
+            self.preview_session.show()
 
     def _reader_thread(self, stream, is_err: bool) -> None:
         try:
@@ -354,7 +548,7 @@ class RGBPointGuiApp:
                 pass
 
     def start_processing(self) -> None:
-        if self.process and self.process.poll() is None:
+        if self.analysis_running or (self.process and self.process.poll() is None):
             return
 
         cfg = self._validate_inputs()
@@ -409,6 +603,21 @@ class RGBPointGuiApp:
             args.extend(["--output-dir", str(cfg["output_dir"])])
         args.extend(["--output-suffix", DEFAULT_BATCH_SUFFIX])
 
+        if self.preview_session is not None:
+            self.preview_session.close()
+            self.preview_session = None
+        self.preview_button.configure(state="disabled")
+        if self.preview_enabled_var.get():
+            try:
+                from experimental_preview.viewer import PreviewSession
+
+                self.preview_session = PreviewSession(self.root)
+                args.extend(["--preview-dir", str(self.preview_session.folder)])
+                self.preview_button.configure(state="normal")
+                self._append_log("Experimental live preview: up to 40,000 sampled points")
+            except Exception as error:
+                self._append_log(f"Live preview unavailable; processing continues: {error}")
+
         try:
             self.process = subprocess.Popen(
                 args,
@@ -421,6 +630,8 @@ class RGBPointGuiApp:
                 bufsize=1,
             )
         except Exception as exc:
+            if self.preview_session is not None:
+                self.preview_session.viewer.processing_ended(1)
             self._append_log(f"ERROR: failed to start process: {exc}")
             messagebox.showerror(APP_TITLE, f"Failed to start backend:\n{exc}")
             return
@@ -440,6 +651,26 @@ class RGBPointGuiApp:
         self.stderr_thread.start()
 
     def _poll_process(self) -> None:
+        while not self.analysis_queue.empty():
+            kind, value = self.analysis_queue.get_nowait()
+            if kind == "callback":
+                callback, arguments = value
+                callback(*arguments)
+                continue
+            if kind == "progress":
+                self.selection_status_var.set(value)
+            else:
+                self.analysis_running = False
+                self.selection_button.configure(state="normal")
+                self.run_button.configure(state="normal")
+                if kind == "complete":
+                    self.selection_status_var.set(
+                        "Metadata check complete. Choose a set in the Photo Download List window."
+                    )
+                    self._show_photo_plans(value)
+                else:
+                    self.selection_status_var.set("Photo selection failed: " + str(value))
+                    messagebox.showerror(APP_TITLE, str(value))
         while True:
             try:
                 line, is_err = self.log_queue.get_nowait()
@@ -453,6 +684,8 @@ class RGBPointGuiApp:
 
         if self.process and self.process.poll() is not None:
             exit_code = self.process.returncode
+            if self.preview_session is not None:
+                self.preview_session.viewer.processing_ended(exit_code)
             self.process = None
             self._set_running(False)
             self.status_var.set("Finished" if exit_code == 0 else "Run failed")
@@ -469,6 +702,7 @@ class RGBPointGuiApp:
 
     def _save_state(self) -> None:
         data = {
+            "data_root": self.data_root_var.get(),
             "las": self.las_var.get(),
             "cal": self.cal_var.get(),
             "iml": self.iml_var.get(),
@@ -492,6 +726,7 @@ class RGBPointGuiApp:
             return
 
         self.las_var.set(str(data.get("las", "")))
+        self.data_root_var.set(str(data.get("data_root", PROJECT_ROOT)))
         self.cal_var.set(str(data.get("cal", "")))
         self.iml_var.set(str(data.get("iml", "")))
         self.images_var.set(str(data.get("images_dir", "")))
@@ -509,6 +744,8 @@ class RGBPointGuiApp:
                 self.process.terminate()
             except Exception:
                 pass
+        if self.preview_session is not None:
+            self.preview_session.close()
         self.root.destroy()
 
 
@@ -534,7 +771,7 @@ def main() -> int:
         return 0
 
     app = RGBPointGuiApp(root)
-    root.mainloop()
+    app.root.mainloop()
     return 0
 
 

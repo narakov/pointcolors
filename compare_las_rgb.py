@@ -13,9 +13,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare RGB values in two or more colored LAS files against a reference LAS."
     )
-    parser.add_argument("--reference", required=True, type=Path, help="Reference colored LAS, for example Bentley output.")
-    parser.add_argument("--candidate", required=True, action="append", type=Path, help="Candidate colored LAS to compare.")
-    parser.add_argument("--chunk-size", type=int, default=500_000, help="Points per comparison chunk.")
+    parser.add_argument(
+        "--reference",
+        required=True,
+        type=Path,
+        help="Reference colored LAS, for example Bentley output.",
+    )
+    parser.add_argument(
+        "--candidate",
+        required=True,
+        action="append",
+        type=Path,
+        help="Candidate colored LAS to compare.",
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=500_000, help="Points per comparison chunk."
+    )
     return parser.parse_args()
 
 
@@ -40,7 +53,9 @@ def iter_xyz_rgb8(path: Path, chunk_size: int):
         yield xyz, rgb8
 
 
-def compare_pair(reference: Path, candidate: Path, chunk_size: int) -> dict[str, float | int | list[float] | list[int]]:
+def compare_pair(
+    reference: Path, candidate: Path, chunk_size: int
+) -> dict[str, float | int | list[float] | list[int]]:
     ref_header = load_las_header(reference)
     cand_header = load_las_header(candidate)
     if ref_header.point_count != cand_header.point_count:
@@ -136,10 +151,14 @@ def main() -> None:
         )
         print(f"  mask equal: {result['mask_equal_pct']:.4f}%")
         print(f"  exact RGB match all points: {result['exact_rgb_match_all_pct']:.4f}%")
-        print(f"  exact RGB match colored intersection: {result['exact_rgb_match_nonblack_pct']:.4f}%")
+        print(
+            f"  exact RGB match colored intersection: {result['exact_rgb_match_nonblack_pct']:.4f}%"
+        )
         print(f"  mean abs diff all: {np.round(result['mean_abs_all'], 4).tolist()}")
         print(f"  RMSE all: {np.round(result['rmse_all'], 4).tolist()}")
-        print(f"  mean abs diff colored intersection: {np.round(result['mean_abs_nonblack'], 4).tolist()}")
+        print(
+            f"  mean abs diff colored intersection: {np.round(result['mean_abs_nonblack'], 4).tolist()}"
+        )
         print(f"  RMSE colored intersection: {np.round(result['rmse_nonblack'], 4).tolist()}")
         print(f"  max abs diff: {result['max_abs_all']}")
 

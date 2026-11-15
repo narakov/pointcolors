@@ -8,13 +8,12 @@ import re
 import shutil
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 from PIL import Image
-
 
 HEADER_SIGNATURE = b"LASF"
 SUPPORTED_INPUT_FORMATS = {0, 1, 2, 3}
@@ -121,9 +120,16 @@ def parse_args() -> argparse.Namespace:
         description="Colorize an uncompressed LAS point cloud by projecting TerraPhoto-style images."
     )
     parser.add_argument("--las", required=True, type=Path, help="Input LAS point cloud.")
-    parser.add_argument("--cal", type=Path, default=None, help="TerraPhoto camera calibration (*.cal).")
+    parser.add_argument(
+        "--cal", type=Path, default=None, help="TerraPhoto camera calibration (*.cal)."
+    )
     parser.add_argument("--iml", type=Path, default=None, help="TerraPhoto image list (*.iml).")
-    parser.add_argument("--ortho-dir", type=Path, default=None, help="Directory with georeferenced orthophoto tiles.")
+    parser.add_argument(
+        "--ortho-dir",
+        type=Path,
+        default=None,
+        help="Directory with georeferenced orthophoto tiles.",
+    )
     parser.add_argument("--output", required=True, type=Path, help="Output LAS with RGB.")
     parser.add_argument(
         "--images-dir",
@@ -296,6 +302,9 @@ def load_iml(path: Path) -> list[ImageRecord]:
             if "=" not in line:
                 continue
             key, value = line.split("=", 1)
+            # Some TerraPhoto exports have no blank lines between image records.
+            if key.strip() == "Image" and "Image" in current:
+                flush()
             current[key.strip()] = value.strip()
     flush()
     return records
@@ -314,7 +323,9 @@ def load_las_header(path: Path) -> LasHeader:
         offset_to_point_data = struct.unpack_from("<I", minimum_header, 96)[0]
         raw_point_format_byte = minimum_header[104]
         if raw_point_format_byte & 0x80:
-            raise ValueError("Compressed LAZ data is not supported. Please use an uncompressed LAS.")
+            raise ValueError(
+                "Compressed LAZ data is not supported. Please use an uncompressed LAS."
+            )
         point_format = raw_point_format_byte & 0x3F
         if point_format not in SUPPORTED_INPUT_FORMATS:
             raise ValueError(
@@ -358,7 +369,11 @@ def load_las_header(path: Path) -> LasHeader:
 
 
 def parse_world_file(path: Path) -> tuple[float, float, float, float, float, float]:
-    lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
     if len(lines) != 6:
         raise ValueError(f"World file {path} must contain exactly 6 numeric lines.")
     return tuple(float(line.replace(",", ".")) for line in lines)  # type: ignore[return-value]
@@ -424,7 +439,9 @@ def build_ortho_tile(image_path: Path, world_path: Path) -> OrthoTile:
     )
 
 
-def load_ortho_tiles(ortho_dir: Path, selected_images: set[str]) -> tuple[list[OrthoTile], list[str]]:
+def load_ortho_tiles(
+    ortho_dir: Path, selected_images: set[str]
+) -> tuple[list[OrthoTile], list[str]]:
     tiles: list[OrthoTile] = []
     missing_world: list[str] = []
     for image_path in sorted(ortho_dir.iterdir()):
@@ -465,8 +482,12 @@ def compute_camera_pose(
 
     correction_sign = projection_options.attitude_corrections_sign
     heading_deg = record.hrp[0] + correction_sign * calibration.attitude_corrections_hrp[0]
-    roll_deg = (record.hrp[1] + correction_sign * calibration.attitude_corrections_hrp[1]) * projection_options.roll_sign
-    pitch_deg = (record.hrp[2] + correction_sign * calibration.attitude_corrections_hrp[2]) * projection_options.pitch_sign
+    roll_deg = (
+        record.hrp[1] + correction_sign * calibration.attitude_corrections_hrp[1]
+    ) * projection_options.roll_sign
+    pitch_deg = (
+        record.hrp[2] + correction_sign * calibration.attitude_corrections_hrp[2]
+    ) * projection_options.pitch_sign
 
     heading = math.radians(heading_deg)
     roll = math.radians(roll_deg)
@@ -537,7 +558,9 @@ def compute_camera_pose(
         axis_x = normalize(np.cross(axis_y, look))
         axis_y = normalize(np.cross(look, axis_x))
 
-        camera_center = np.array(record.xyz, dtype=np.float64) + body_axes @ np.array(calibration.lever_arm, dtype=np.float64)
+        camera_center = np.array(record.xyz, dtype=np.float64) + body_axes @ np.array(
+            calibration.lever_arm, dtype=np.float64
+        )
 
     footprint = approximate_footprint_bbox(
         camera_center=camera_center,
@@ -616,7 +639,73 @@ def bboxes_intersect(
     )
 
 
-def distortion_shift(calibration: Calibration, rx: np.ndarray, ry: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def projection_bounds(
+    pose: CameraPose,
+    calibration: Calibration,
+    z_min: float,
+    z_max: float,
+    image_size: tuple[int, int] | None = None,
+) -> tuple[float, float, float, float] | None:
+    """Conservative XY bounds for a distortion-free, downward-looking camera."""
+    if image_size is not None and image_size != calibration.image_size:
+        return None
+    if calibration.margin < 0:
+        return None
+    if any((*calibration.lens_a, *calibration.lens_k, *calibration.lens_p)):
+        return None
+    if pose.center[2] <= z_max:
+        return None
+    width, height = calibration.image_size
+    corners = (
+        np.array(
+            [
+                [-width / 2, -height / 2],
+                [width / 2, -height / 2],
+                [width / 2, height / 2],
+                [-width / 2, height / 2],
+            ]
+        )
+        - calibration.principal_point[:2]
+    )
+    ray_z = (
+        corners[:, 0] * pose.axis_x[2]
+        + corners[:, 1] * pose.axis_y[2]
+        + calibration.focal_length_pixels * pose.axis_z[2]
+    )
+    if np.any(ray_z >= 0):
+        return None
+    boxes = [
+        approximate_footprint_bbox(
+            pose.center, pose.axis_x, pose.axis_y, pose.axis_z, calibration, z
+        )
+        for z in (z_min, z_max)
+    ]
+    if any(box is None for box in boxes):
+        return None
+    return (
+        min(box[0] for box in boxes) - 1,
+        max(box[1] for box in boxes) + 1,
+        min(box[2] for box in boxes) - 1,
+        max(box[3] for box in boxes) + 1,
+    )
+
+
+def projection_candidate_indices(points, bounds, z_min, z_max):
+    if bounds is None:
+        return None
+    inside_xy = (
+        (points[:, 0] >= bounds[0])
+        & (points[:, 0] <= bounds[1])
+        & (points[:, 1] >= bounds[2])
+        & (points[:, 1] <= bounds[3])
+    )
+    outside_height = (points[:, 2] < z_min) | (points[:, 2] > z_max)
+    return np.flatnonzero(inside_xy | outside_height)
+
+
+def distortion_shift(
+    calibration: Calibration, rx: np.ndarray, ry: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     d2 = rx * rx + ry * ry
     d4 = d2 * d2
     radial = np.zeros_like(rx)
@@ -641,7 +730,9 @@ def distortion_shift(calibration: Calibration, rx: np.ndarray, ry: np.ndarray) -
     return dx, dy
 
 
-def corrected_to_raw_pixels(calibration: Calibration, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def corrected_to_raw_pixels(
+    calibration: Calibration, x: np.ndarray, y: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     if not any(
         abs(value) > 0.0
         for value in (
@@ -690,6 +781,38 @@ def points_from_chunk(data: bytes, record_length: int) -> tuple[np.ndarray, np.n
     )
     view = np.frombuffer(data, dtype=point_dtype)
     return view["x"], view["y"], view["z"]
+
+
+class LasCoordinates:
+    """Reuse decoded coordinates when the cloud fits the memory budget."""
+
+    def __init__(self, path, header, chunk_size, cache_bytes=512 * 1024 * 1024):
+        self.path = path
+        self.header = header
+        self.chunk_size = chunk_size
+        self.cache_enabled = header.point_count * 3 * 8 <= cache_bytes
+        self._blocks = None
+
+    def __iter__(self):
+        if self._blocks is not None:
+            yield from self._blocks
+            return
+        blocks = []
+        header = self.header
+        for start, _, data in iter_point_chunks(self.path, header, self.chunk_size):
+            raw = points_from_chunk(data, header.point_record_length)
+            xyz = np.column_stack(
+                tuple(
+                    axis.astype(np.float64) * scale + offset
+                    for axis, scale, offset in zip(raw, header.scales, header.offsets)
+                )
+            )
+            xyz.flags.writeable = False
+            if self.cache_enabled:
+                blocks.append((start, xyz))
+            yield start, xyz
+        if self.cache_enabled:
+            self._blocks = blocks
 
 
 def rgb16_bytes(colors_u8: np.ndarray) -> np.ndarray:
@@ -761,7 +884,9 @@ def project_points(
     return visible, inside_indices, np.stack((sample_x, sample_y), axis=1), radial_score
 
 
-def project_points_to_ortho(points_xy: np.ndarray, tile: OrthoTile) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def project_points_to_ortho(
+    points_xy: np.ndarray, tile: OrthoTile
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     pixel_xy = (points_xy - tile.origin.reshape(1, 2)) @ tile.matrix_inv.T
     pixel_x = pixel_xy[:, 0]
     pixel_y = pixel_xy[:, 1]
@@ -821,7 +946,9 @@ def write_output_las(
         out_handle.write(output_header)
 
         for start_index, count, chunk_bytes in iter_point_chunks(las_path, header, chunk_size):
-            in_array = np.frombuffer(chunk_bytes, dtype=np.uint8).reshape(count, header.point_record_length)
+            in_array = np.frombuffer(chunk_bytes, dtype=np.uint8).reshape(
+                count, header.point_record_length
+            )
             out_array: np.ndarray
 
             chunk_colors = colors[start_index : start_index + count]
@@ -832,7 +959,9 @@ def write_output_las(
                 rgb_offset = RGB_OFFSET[header.point_format]
                 color_mask = np.isfinite(scores[start_index : start_index + count])
                 if np.any(color_mask):
-                    out_array[color_mask, rgb_offset : rgb_offset + 6] = chunk_color_bytes[color_mask]
+                    out_array[color_mask, rgb_offset : rgb_offset + 6] = chunk_color_bytes[
+                        color_mask
+                    ]
             else:
                 output_length = header.output_record_length
                 standard_length = STANDARD_POINT_LENGTH[header.point_format]
@@ -858,6 +987,7 @@ def colorize(
     default_color: np.ndarray,
     disable_overlap_filter: bool,
     projection_options: PhotoProjectionOptions,
+    on_image=None,
 ) -> None:
     if las_path.resolve() == output_path.resolve():
         raise ValueError("Output LAS must be different from the input LAS.")
@@ -869,22 +999,36 @@ def colorize(
 
     selected = {name.lower() for name in selected_images}
     if selected:
-        image_records = [record for record in image_records if record.image_name.lower() in selected]
+        image_records = [
+            record for record in image_records if record.image_name.lower() in selected
+        ]
     if not image_records:
         raise ValueError("No image records matched the provided filters.")
 
     image_root = image_dir if image_dir is not None else iml_path.parent
     ground_z = (header.min_xyz[2] + header.max_xyz[2]) / 2.0
-    las_bbox_xy = (header.min_xyz[0], header.max_xyz[0], header.min_xyz[1], header.max_xyz[1])
+    from photo_selection import candidate_poses, resolve_image_paths
 
-    existing_poses: list[CameraPose] = []
-    missing_images: list[str] = []
-    for record in image_records:
-        pose = compute_camera_pose(record, calibration, image_root, ground_z, projection_options)
-        if not pose.image_path.exists():
-            missing_images.append(record.image_name)
-            continue
-        existing_poses.append(pose)
+    if disable_overlap_filter:
+        candidates = [
+            compute_camera_pose(record, calibration, image_root, ground_z, projection_options)
+            for record in image_records
+        ]
+    else:
+        candidates = candidate_poses(
+            image_records, calibration, header, image_root, projection_options
+        )
+        if not candidates:
+            raise ValueError(
+                "No IML photo overlaps the LAS. Check the coordinate system, flight and CAL."
+            )
+    paths = resolve_image_paths([pose.image_name for pose in candidates], image_root)
+    existing_poses = [
+        replace(pose, image_path=paths[pose.image_name])
+        for pose in candidates
+        if pose.image_name in paths
+    ]
+    missing_images = [pose.image_name for pose in candidates if pose.image_name not in paths]
 
     if not existing_poses:
         raise ValueError(
@@ -893,16 +1037,6 @@ def colorize(
             f"Images folder: {image_root}. "
             "This usually means the selected IML file and the images folder belong to different dates or flight blocks."
         )
-
-    if disable_overlap_filter:
-        poses_to_use = existing_poses
-    else:
-        filtered = [
-            pose
-            for pose in existing_poses
-            if pose.footprint_bbox is None or bboxes_intersect(pose.footprint_bbox, las_bbox_xy, margin=50.0)
-        ]
-        poses_to_use = filtered if filtered else existing_poses
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -937,37 +1071,37 @@ def colorize(
             preview = ", ".join(missing_images[:5])
             suffix = " ..." if len(missing_images) > 5 else ""
             print(f"Missing image files: {len(missing_images)} ({preview}{suffix})")
-        print(f"Images selected for projection: {len(poses_to_use)}")
+        print(f"Images selected for projection: {len(existing_poses)}")
+        coordinates = LasCoordinates(las_path, header, chunk_size)
 
-        if not disable_overlap_filter and not any(
-            pose.footprint_bbox is not None and bboxes_intersect(pose.footprint_bbox, las_bbox_xy, margin=50.0)
-            for pose in existing_poses
-        ):
-            print(
-                "Warning: no image footprint overlaps the LAS bounding box with the current inputs. "
-                "Processing will continue, but the cloud and imagery may belong to different areas."
-            )
-
-        for image_index, pose in enumerate(poses_to_use, start=1):
+        for image_index, pose in enumerate(existing_poses, start=1):
             with Image.open(pose.image_path) as image:
                 image_array = np.asarray(image.convert("RGB"))
 
-            print(f"[{image_index}/{len(poses_to_use)}] Projecting {pose.image_name}")
+            print(f"[{image_index}/{len(existing_poses)}] Projecting {pose.image_name}")
+            bounds = projection_bounds(
+                pose,
+                calibration,
+                header.min_xyz[2],
+                header.max_xyz[2],
+                (image_array.shape[1], image_array.shape[0]),
+            )
 
-            for start_index, count, chunk_bytes in iter_point_chunks(las_path, header, chunk_size):
-                x_raw, y_raw, z_raw = points_from_chunk(chunk_bytes, header.point_record_length)
-                xyz = np.column_stack(
-                    (
-                        x_raw.astype(np.float64) * header.scales[0] + header.offsets[0],
-                        y_raw.astype(np.float64) * header.scales[1] + header.offsets[1],
-                        z_raw.astype(np.float64) * header.scales[2] + header.offsets[2],
-                    )
+            for start_index, xyz in coordinates:
+                candidates = projection_candidate_indices(
+                    xyz, bounds, header.min_xyz[2], header.max_xyz[2]
                 )
-
-                _, inside_indices, sample_xy, radial_score = project_points(xyz, pose, calibration, image_array.shape)
+                if candidates is not None:
+                    if not len(candidates):
+                        continue
+                    xyz = xyz[candidates]
+                _, inside_indices, sample_xy, radial_score = project_points(
+                    xyz, pose, calibration, image_array.shape
+                )
                 if inside_indices.size == 0:
                     continue
-
+                if candidates is not None:
+                    inside_indices = candidates[inside_indices]
                 absolute_indices = start_index + inside_indices
                 current_scores = scores[absolute_indices]
                 better = radial_score > current_scores
@@ -980,6 +1114,13 @@ def colorize(
 
                 scores[better_indices] = radial_score[better].astype(np.float32)
                 colors[better_indices] = sampled_colors
+
+            if on_image is not None:
+                try:
+                    on_image(image_index, len(existing_poses), pose.image_name, colors, scores)
+                except Exception as error:
+                    print(f"Live preview disabled: {error}")
+                    on_image = None
 
         scores.flush()
         colors.flush()
@@ -1037,7 +1178,9 @@ def colorize_orthos(
     if disable_overlap_filter:
         tiles_to_use = tiles
     else:
-        filtered = [tile for tile in tiles if bboxes_intersect(tile.footprint_bbox, las_bbox_xy, margin=1.0)]
+        filtered = [
+            tile for tile in tiles if bboxes_intersect(tile.footprint_bbox, las_bbox_xy, margin=1.0)
+        ]
         tiles_to_use = filtered if filtered else tiles
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1166,7 +1309,9 @@ def main() -> None:
         return
 
     if args.cal is None or args.iml is None:
-        raise ValueError("Provide either --ortho-dir for orthophotos or both --cal and --iml for photo projection.")
+        raise ValueError(
+            "Provide either --ortho-dir for orthophotos or both --cal and --iml for photo projection."
+        )
 
     colorize(
         las_path=args.las.resolve(),
