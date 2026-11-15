@@ -309,6 +309,35 @@ def resolve_image_paths(names, image_root):
     return resolved
 
 
+def image_availability(las_paths, cal_path, iml_path, image_root, options=None):
+    """Check the photos needed by the active camera models, without decoding JPGs."""
+    calibration = load_calibration(Path(cal_path))
+    records = load_iml(Path(iml_path))
+    if not records:
+        raise ValueError("The Image List contains no valid camera records.")
+    required = set()
+    for las_path in las_paths:
+        header = load_las_header(Path(las_path))
+        for option in options or DEFAULT_OPTIONS:
+            required.update(
+                pose.image_name
+                for pose in candidate_poses(records, calibration, header, Path(image_root), option)
+            )
+    names = list(
+        dict.fromkeys(record.image_name for record in records if record.image_name in required)
+    )
+    if not names:
+        raise ValueError(
+            "No IML photo overlaps the LAS. Check the coordinate system, flight and CAL."
+        )
+    paths = resolve_image_paths(names, image_root)
+    return {
+        "required": len(names),
+        "found": len(paths),
+        "missing": [name for name in names if name not in paths],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Select photos from metadata without downloading JPG files"

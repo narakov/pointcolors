@@ -469,6 +469,33 @@ class RGBPointGuiApp:
                 return None
 
         try:
+            from photo_selection import image_availability
+
+            images_folder = Path(required_common["Images folder"])
+            if not images_folder.is_dir():
+                raise ValueError("Images Folder must be a folder containing the downloaded photos.")
+            availability = image_availability(
+                las_paths,
+                required_common["Camera calibration (.cal)"],
+                required_common["Image list (.iml)"],
+                images_folder,
+            )
+        except (OSError, ValueError, KeyError) as error:
+            messagebox.showerror(APP_TITLE, f"Photo check failed:\n\n{error}")
+            return None
+        if availability["missing"]:
+            names = "\n".join(availability["missing"][:5])
+            messagebox.showerror(
+                APP_TITLE,
+                f"Found {availability['found']} of {availability['required']} required photos in Images Folder.\n\n"
+                f"Folder:\n{images_folder}\n\n"
+                "Photo selection prepares a list; it does not download images. "
+                "Choose the folder containing your downloaded photos, or download the missing photos first.\n\n"
+                f"Missing photos (first 5):\n{names}",
+            )
+            return None
+
+        try:
             chunk = int(self.chunk_var.get().strip())
             if chunk <= 0:
                 raise ValueError
@@ -628,6 +655,7 @@ class RGBPointGuiApp:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
             )
         except Exception as exc:
             if self.preview_session is not None:

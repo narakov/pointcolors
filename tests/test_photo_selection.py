@@ -15,6 +15,7 @@ from photo_selection import (
     analyze_folder,
     export_plan,
     export_recommended_list,
+    image_availability,
     plan_photos,
     resolve_image_paths,
 )
@@ -131,6 +132,17 @@ class PhotoSelectionTests(unittest.TestCase):
                 (root / name / "same.jpg").touch()
             with self.assertRaisesRegex(ValueError, "Multiple photos"):
                 resolve_image_paths(["same.jpg"], root)
+
+    def test_photo_check_ignores_nonoverlapping_iml_records_without_decoding_images(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            las, cal, iml = fixture(root)
+            photos = root / "photos" / "nested"
+            photos.mkdir(parents=True)
+            (photos / "near.jpg").touch()
+            with patch("PIL.Image.open", side_effect=AssertionError("Do not decode photos")):
+                check = image_availability([las], cal, iml, root / "photos")
+            self.assertEqual(check, {"required": 1, "found": 1, "missing": []})
 
 
 if __name__ == "__main__":

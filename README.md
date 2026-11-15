@@ -70,8 +70,14 @@ Click **Save List and Use This Set** to export:
 - `README.txt` — instructions in English;
 - `photos/` — the target folder for downloaded photographs.
 
-The CAL, selected IML and target photo folder are filled into the main window.
-Download the listed photographs, then start colorization. If you select photos
+The CAL and selected IML are filled into the main window. An existing
+**Images Folder** is preserved; if none was selected, a new `photos/` folder is
+prepared. The dialog reports how many selected photos were found there. If the
+photos are already downloaded, use their existing folder without copying them.
+Photo selection does not download images. Before colorization, the application
+checks the required photo files and lists missing names instead of starting an
+incomplete run. Download missing photos or choose the correct folder first.
+If you select photos
 again from an exported set, its `selection.json` is used to find the original
 flight IML when that file is still available.
 

@@ -202,7 +202,7 @@ def show_photo_plans(app, report, project_root: Path, app_title: str, output_suf
         plan = effective_plan()
         if not plan or not plan["candidate_count"]:
             return
-        from photo_selection import export_plan
+        from photo_selection import export_plan, resolve_image_paths
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         output = project_root / "photo_plans" / f"{Path(plan['las']).stem}_{stamp}"
@@ -213,21 +213,42 @@ def show_photo_plans(app, report, project_root: Path, app_title: str, output_suf
             )
             downloads = output / "photos"
             downloads.mkdir()
+            previous_folder = app.images_var.get().strip()
+            images_folder = Path(previous_folder) if previous_folder else downloads
+            names = [photo["image"] for photo in plan["photos"]]
+            found = len(resolve_image_paths(names, images_folder)) if images_folder.is_dir() else 0
+            count = len(names)
             app.las_var.set(plan["las"])
             app.cal_var.set(plan["cal"])
             app.iml_var.set(str(output / "selected.iml"))
-            app.images_var.set(str(downloads))
+            app.images_var.set(str(images_folder))
             source = Path(plan["las"])
             app.output_var.set(str(source.with_name(source.stem + output_suffix + ".LAS")))
             app.selection_status_var.set(
-                f"List saved: {plan['candidate_count']} photos. Download them to Images Folder, then start colorization."
+                f"List saved: {count} photos. Found {found} of {count} in Images Folder. "
+                + (
+                    "Ready to start colorization."
+                    if found == count
+                    else "Choose the photo folder or download the missing photos."
+                )
             )
             app._append_log(f"Download list: {output / 'photos_needed.txt'}")
             app._append_log(f"IML: {plan['iml']} · CAL: {plan['cal']}")
+            app._append_log(
+                f"Images Folder: {images_folder} · Found {found} of {count} selected photos"
+            )
             app._save_state()
             messagebox.showinfo(
                 app_title,
-                f"Ready: {plan['candidate_count']} photo names.\n\nList: {output / 'photos_needed.txt'}\n\nDownload photos from the selected flight to:\n{downloads}\n\nCAL and the selected IML are filled in. Start colorization after downloading the photos.",
+                f"Photo list saved: {count} photos.\n\nList: {output / 'photos_needed.txt'}\n\n"
+                f"Images Folder:\n{images_folder}\n\nFound {found} of {count} selected photos.\n\n"
+                + ("Your existing Images Folder has been preserved.\n" if previous_folder else "")
+                + (
+                    "Ready to start colorization. No copying or downloading is needed."
+                    if found == count
+                    else "Photo selection only prepares a list; it does not copy or download images. "
+                    "Choose the folder with downloaded photos, or download the missing photos to Images Folder."
+                ),
             )
             dialog.destroy()
         except Exception as error:

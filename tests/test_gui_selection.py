@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from test_photo_selection import fixture
 
@@ -13,6 +15,7 @@ import rgbpoint_gui as gui
 
 
 def dispose_root(root):
+    root.update_idletasks()
     for event in root.tk.call("after", "info"):
         root.after_cancel(event)
     root.destroy()
@@ -72,6 +75,10 @@ class GuiSelectionTests(unittest.TestCase):
                 handle.write("Image=second_near.jpg\nXyz=1 0 100\nHrp=0 0 0\n")
             plan = plan_photos(las, cal, iml)
             self.assertEqual(plan["candidate_count"], 2)
+            downloaded = folder / "downloaded"
+            (downloaded / "nested").mkdir(parents=True)
+            for name in ("near.jpg", "second_near.jpg"):
+                Image.new("RGB", (100, 100), (200, 100, 50)).save(downloaded / "nested" / name)
             top_class = tk.Toplevel
 
             def hidden_top(*args, **kwargs):
@@ -91,6 +98,7 @@ class GuiSelectionTests(unittest.TestCase):
                 root.withdraw()
                 try:
                     app = gui.RGBPointGuiApp(root)
+                    app.images_var.set(str(downloaded))
                     with patch.object(gui.tk, "Toplevel", side_effect=hidden_top):
                         app._show_photo_plans({"plans": [plan], "errors": []})
                     dialog = next(w for w in root.winfo_children() if isinstance(w, top_class))
@@ -128,7 +136,9 @@ class GuiSelectionTests(unittest.TestCase):
                     apply.invoke()
                     error.assert_not_called()
                     self.assertEqual(len(load_iml(Path(app.iml_var.get()))), 1)
-                    self.assertTrue(Path(app.images_var.get()).is_dir())
+                    self.assertEqual(Path(app.images_var.get()), downloaded)
+                    self.assertIn("Found 1 of 1", app.selection_status_var.get())
+                    self.assertIsNotNone(app._validate_inputs())
                     with patch.object(gui.tk, "Toplevel", side_effect=hidden_top):
                         app._show_photo_plans({"plans": [plan], "errors": []})
                     full_dialog = next(w for w in root.winfo_children() if isinstance(w, top_class))
@@ -144,6 +154,8 @@ class GuiSelectionTests(unittest.TestCase):
                     full_apply.invoke()
                     error.assert_not_called()
                     self.assertEqual(len(load_iml(Path(app.iml_var.get()))), 2)
+                    self.assertEqual(Path(app.images_var.get()), downloaded)
+                    self.assertIsNotNone(app._validate_inputs())
                 finally:
                     dispose_root(root)
 
@@ -180,6 +192,70 @@ class GuiSelectionTests(unittest.TestCase):
                         self.assertNotIn("disabled", app.run_button.state())
                 finally:
                     dispose_root(root)
+
+    def test_missing_photos_are_reported_before_starting_backend(self):
+        from tkinter import ttk
+
+        from photo_selection import plan_photos
+
+        for existing_photos in (0, 1):
+            with (
+                self.subTest(existing_photos=existing_photos),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                folder = Path(scratch)
+                las, cal, iml = fixture(folder)
+                with iml.open("a") as handle:
+                    handle.write("Image=second_near.jpg\nXyz=1 0 100\nHrp=0 0 0\n")
+                plan = plan_photos(las, cal, iml)
+                top_class = tk.Toplevel
+
+                def hidden_top(*args, **kwargs):
+                    top = top_class(*args, **kwargs)
+                    top.withdraw()
+                    return top
+
+                def descendants(widget):
+                    for child in widget.winfo_children():
+                        yield child
+                        yield from descendants(child)
+
+                with (
+                    patch.object(gui, "PROJECT_ROOT", folder),
+                    patch.object(gui, "STATE_FILE", folder / "state.json"),
+                    patch.object(gui, "LAUNCHER_LOG_FILE", folder / "launcher.log"),
+                    patch.object(gui, "RUN_LOG_FILE", folder / "run.log"),
+                    patch.object(gui.messagebox, "showinfo"),
+                    patch.object(gui.messagebox, "showerror") as error,
+                    patch.object(gui.subprocess, "Popen") as launch,
+                ):
+                    root = tk.Tk()
+                    root.withdraw()
+                    try:
+                        app = gui.RGBPointGuiApp(root)
+                        if existing_photos:
+                            photos = folder / "downloaded"
+                            photos.mkdir()
+                            Image.new("RGB", (100, 100), (200, 100, 50)).save(photos / "near.jpg")
+                            app.images_var.set(str(photos))
+                        with patch.object(gui.tk, "Toplevel", side_effect=hidden_top):
+                            app._show_photo_plans({"plans": [plan], "errors": []})
+                        apply = next(
+                            widget
+                            for widget in descendants(root)
+                            if isinstance(widget, ttk.Button)
+                            and widget.cget("text") == "Save List and Use This Set"
+                        )
+                        apply.invoke()
+                        error.assert_not_called()
+                        self.assertTrue(Path(app.images_var.get()).is_dir())
+                        app.start_processing()
+                        launch.assert_not_called()
+                        error.assert_called_once()
+                        self.assertIn(f"Found {existing_photos} of 2", error.call_args.args[1])
+                        self.assertIn("does not download", error.call_args.args[1])
+                    finally:
+                        dispose_root(root)
 
 
 if __name__ == "__main__":
